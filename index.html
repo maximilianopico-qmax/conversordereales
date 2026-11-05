@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f2f4f7">
+<title>Conversión de reales by MAP</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f2f4f7;color:#17202a}
+.app{max-width:520px;margin:auto;padding:24px 18px 30px}
+.card{background:white;border-radius:22px;padding:24px;box-shadow:0 8px 30px #00000012}
+h1{font-size:24px;margin:0 0 5px}
+.sub{color:#68717c;margin:0 0 22px;font-size:14px}
+label{display:block;font-size:14px;font-weight:650;margin-bottom:7px;margin-top:15px}
+input{width:100%;font-size:30px;padding:14px;border:2px solid #dce1e6;border-radius:14px;outline:none}
+input:focus{border-color:#3578e5}
+.input-small{font-size:20px;padding:12px}
+button{width:100%;border:0;border-radius:13px;padding:13px;margin-top:16px;font-size:16px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+.primary{background:#17202a;color:white}
+.secondary{background:#eef1f4;color:#17202a}
+.results{display:grid;gap:12px;margin-top:20px}
+.result{padding:17px;border-radius:16px;background:#f7f8fa}
+.result .title{font-size:13px;color:#68717c}
+.result .value{font-size:28px;font-weight:750;margin-top:4px}
+.rate{margin-top:18px;padding-top:15px;border-top:1px solid #e5e8eb;font-size:13px;color:#59636e;line-height:1.6}
+.status{margin-top:12px;font-size:12px;color:#68717c;text-align:center}
+.error{color:#b42318;background:#fff0ef;padding:12px;border-radius:12px;margin-top:15px;font-size:13px}
+.small{font-size:11px;color:#7a838d;margin-top:18px;line-height:1.45}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="card">
+    <h1>🇧🇷 Conversión de reales by MAP</h1>
+    <p class="sub">BRL → dólares estadounidenses y pesos argentinos</p>
+
+    <label for="brl">Monto en reales brasileños</label>
+    <input id="brl" type="number" inputmode="decimal" min="0" step="0.01"
+           placeholder="Ej.: 100" value="100" autocomplete="off" enterkeyhint="done">
+
+    <label for="manualRate">Cotización bancaria Pix (ARS por 1 BRL) - Opcional</label>
+    <input id="manualRate" class="input-small" type="number" inputmode="decimal" min="0" step="0.01"
+           placeholder="Ej: dejar vacío para automático" autocomplete="off" enterkeyhint="done">
+
+    <button class="primary" id="btnConvert" onclick="convertir()">Convertir</button>
+    <button class="secondary" id="btnUpdate" onclick="actualizar()">↻ Actualizar cotizaciones</button>
+
+    <div id="error"></div>
+    <div class="results">
+      <div class="result">
+        <div class="title">🇺🇸 Equivalente en dólares</div>
+        <div class="value" id="usd">—</div>
+      </div>
+      <div class="result">
+        <div class="title">🇦🇷 Equivalente en pesos argentinos</div>
+        <div class="value" id="ars">—</div>
+      </div>
+    </div>
+
+    <div class="rate">
+      <div>1 USD = <b id="brlRate">—</b> BRL</div>
+      <div>1 USD = <b id="blueRate">—</b> ARS (dólar blue)</div>
+      <div>Fuente BRL/USD: <span id="fxSource">—</span></div>
+      <div>Fuente dólar blue: <span id="blueSource">—</span></div>
+    </div>
+    <div class="status" id="status">Cargando cotizaciones…</div>
+    <div class="small">
+      Si ingresás una cotización bancaria manual, el cálculo en ARS se hará con ese valor exacto.
+      De lo contrario, se usará el dólar blue automático.
+    </div>
+  </div>
+</div>
+
+<script>
+const CACHE_KEY = "brl_converter_rates_v1";
+
+function fmt(n, currency){
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency", currency,
+    maximumFractionDigits: currency === "USD" ? 2 : 0
+  }).format(n);
+}
+
+function mostrarError(msg = ""){
+  document.getElementById("error").innerHTML = msg ? `<div class="error">${msg}</div>` : "";
+}
+
+function leerCache(){
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "null"); }
+  catch { return null; }
+}
+function guardarCache(rates){
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(rates)); } catch {}
+}
+
+async function fetchConTimeout(url, ms = 10000){
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { cache: "no-store", signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function obtenerFX(){
+  // 1) Frankfurter — CORS habilitado, sin key
+  try {
+    const r = await fetchConTimeout("https://api.frankfurter.app/latest?from=USD&to=BRL");
+    if (r.ok) {
+      const j = await r.json();
+      const brl = Number(j?.rates?.BRL);
+      if (Number.isFinite(brl) && brl > 0) {
+        return { brlPerUsd: brl, source: "Frankfurter" };
+      }
+    }
+  } catch (e) { /* probamos el fallback */ }
+
+  // 2) Fallback: proxy CORS oficial de AwesomeAPI
+  const target = "https://economia.awesomeapi.com.br/json/last/USD-BRL";
+  const url = `https://enable-cors.awesomeapi.com.br/api?u=${encodeURIComponent(target)}`;
+  const r = await fetchConTimeout(url);
+  if (!r.ok) throw new Error("No se pudo obtener USD/BRL");
+  const j = await r.json();
+  const brl = Number(j?.USDBRL?.bid ?? j?.data?.USDBRL?.bid ?? j?.bid);
+  if (!Number.isFinite(brl) || brl <= 0) throw new Error("Respuesta inválida de USD/BRL");
+  return { brlPerUsd: brl, source: "AwesomeAPI (proxy)" };
+}
+
+async function obtenerBlue(){
+  const r = await fetchConTimeout("https://dolarapi.com/v1/dolares/blue");
+  if (!r.ok) throw new Error("No se pudo obtener dólar blue");
+  const j = await r.json();
+  const venta = Number(j.venta);
+  if (!Number.isFinite(venta) || venta <= 0) throw new Error("Respuesta inválida del dólar blue");
+  return { blueSell: venta, source: "DolarAPI" };
+}
+
+function convertir(){
+  const brl = parseFloat(document.getElementById("brl").value);
+  const manualRate = parseFloat(document.getElementById("manualRate").value);
+  const rates = leerCache();
+
+  if (!Number.isFinite(brl) || brl < 0) {
+    mostrarError("Ingresá un monto válido.");
+    return;
+  }
+
+  let usd = 0;
+  let ars = 0;
+
+  if (Number.isFinite(manualRate) && manualRate > 0) {
+    ars = brl * manualRate;
+    if (rates) usd = brl / rates.brlPerUsd;
+  } else {
+    if (!rates) { mostrarError("Todavía no hay cotizaciones disponibles."); return; }
+    usd = brl / rates.brlPerUsd;
+    ars = usd * rates.blueSell;
+  }
+
+  document.getElementById("usd").textContent = usd > 0 ? fmt(usd, "USD") : "—";
+  document.getElementById("ars").textContent = fmt(ars, "ARS");
+  mostrarError("");
+}
+
+function pintar(rates, stale){
+  document.getElementById("brlRate").textContent = rates.brlPerUsd.toFixed(4);
+  document.getElementById("blueRate").textContent = fmt(rates.blueSell, "ARS");
+  document.getElementById("fxSource").textContent = rates.fxSource || "—";
+  document.getElementById("blueSource").textContent = rates.blueSource || "—";
+  const d = new Date(rates.updated);
+  document.getElementById("status").textContent =
+    (stale ? "Usando última cotización guardada · " : "Actualizado · ") +
+    d.toLocaleString("es-AR");
+}
+
+async function actualizar(){
+  mostrarError("");
+  const btn = document.getElementById("btnUpdate");
+  if (btn) btn.disabled = true;
+  document.getElementById("status").textContent = "Actualizando…";
+
+  const old = leerCache();
+  const results = await Promise.allSettled([obtenerFX(), obtenerBlue()]);
+  const fx   = results[0].status === "fulfilled" ? results[0].value : null;
+  const blue = results[1].status === "fulfilled" ? results[1].value : null;
+
+  if (fx || blue) {
+    const rates = {
+      brlPerUsd:  fx?.brlPerUsd  ?? old?.brlPerUsd,
+      blueSell:   blue?.blueSell ?? old?.blueSell,
+      fxSource:   fx?.source     ?? old?.fxSource,
+      blueSource: blue?.source   ?? old?.blueSource,
+      updated: new Date().toISOString()
+    };
+    guardarCache(rates);
+    pintar(rates, false);
+    convertir();
+  } else if (old) {
+    pintar(old, true);
+    convertir();
+    mostrarError("No se pudo actualizar; usando cotización guardada.");
+  } else {
+    mostrarError("No se pudieron obtener las cotizaciones. Verificá tu conexión o abrí la página desde una URL HTTPS.");
+    document.getElementById("status").textContent = "Sin cotizaciones";
+  }
+
+  if (btn) btn.disabled = false;
+}
+
+document.getElementById("brl").addEventListener("input", convertir);
+document.getElementById("manualRate").addEventListener("input", convertir);
+actualizar();
+</script>
+</body>
+</html>
